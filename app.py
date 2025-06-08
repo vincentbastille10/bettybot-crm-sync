@@ -1,195 +1,202 @@
-"""Spectra Media – Lead capture & Zoho sync
-------------------------------------------------
-Flask app that :
-1. receives a POST (/submit) from your chatbot / form
-2. refreshes Zoho OAuth token automatically (thread‑safe)
-3. creates the Lead in Zoho CRM
-4. optionally attaches a PDF (if provided)
-5. sends a confirmation email (SMTP)
+"""Spectra Media – BettyBot CRM Sync
+================================================
+Flask micro‑service :
+• reçoit un POST (/submit) venant d’un chatbot ou d’un formulaire
+• rafraîchit automatiquement le token OAuth Zoho (thread daemon)
+• crée le Lead dans Zoho CRM + pièce jointe PDF facultative
+• retourne une réponse JSON qui indique success / error
 
-All secrets are expected as ENV variables in Render.
+Toutes les valeurs sensibles (tokens, SMTP, etc.) **doivent** être passées en variables d’environnement (Render).
 """
+from __future__ import annotations
 
 import os
 import time
 import threading
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Dict, Any, Optional
 
 import requests
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 
-# --------------------------------------------------
-# Configuration (all overridable from Render ENV)
-# --------------------------------------------------
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-EMAIL_DEST = os.getenv("EMAIL_DEST")  # ex: "vinylestorefrance@gmail.com"
+# ---------------------------------------------------------------------------
+# Configuration depuis ENV (avec fallback minimal local)
+# ---------------------------------------------------------------------------
+SMTP_SERVER   = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT     = int(os.getenv("SMTP_PORT", 587))
+SMTP_USER     = os.getenv("SMTP_USER", "dummy@example.com")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "changeme")
+EMAIL_DEST    = os.getenv("EMAIL_DEST", "vincent@example.com")
 
-ZOHO_API_URL = os.getenv("ZOHO_API_URL", "https://www.zohoapis.eu/crm/v2/Leads")
-ZOHO_ATTACHMENT_URL = (
-    os.getenv("ZOHO_ATTACHMENT_URL", "https://www.zohoapis.eu/crm/v2/Leads/{record_id}/Attachments")
-)
-ZOHO_CLIENT_ID = os.getenv("ZOHO_CLIENT_ID")
-ZOHO_CLIENT_SECRET = os.getenv("ZOHO_CLIENT_SECRET")
-ZOHO_REFRESH_TOKEN = os.getenv("ZOHO_REFRESH_TOKEN")
-INITIAL_ACCESS_TOKEN = os.getenv("ZOHO_ACCESS_TOKEN")  # facultatif (démarrage rapide)
+ZOHO_CLIENT_ID     = os.getenv("ZOHO_CLIENT_ID", "")
+ZOHO_CLIENT_SECRET = os.getenv("ZOHO_CLIENT_SECRET", "")
+ZOHO_REFRESH_TOKEN = os.getenv("ZOHO_REFRESH_TOKEN", "")
 
-# --------------------------------------------------
-# Minimal logging setup
-# --------------------------------------------------
+# endpoints
+ZOHO_BASE_API   = os.getenv("ZOHO_BASE_API", "https://www.zohoapis.eu")
+LEADS_ENDPOINT  = f"{ZOHO_BASE_API}/crm/v2/Leads"
+ATTACH_ENDPOINT = f"{ZOHO_BASE_API}/crm/v2/Leads/{{record_id}}/Attachments"
+TOKEN_ENDPOINT  = "https://accounts.zoho.eu/oauth/v2/token"
+
+# dossier temporaire pour les uploads
+UPLOAD_DIR = Path("/tmp/uploads")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s – %(message)s")
 logger = logging.getLogger("bettybot-crm-sync")
 
-# --------------------------------------------------
-# OAuth token keeper
-# --------------------------------------------------
+# ---------------------------------------------------------------------------
+# Gestion du token OAuth Zoho (auto‑refresh)
+# ---------------------------------------------------------------------------
 class ZohoTokenKeeper:
-    """Maintient un access_token valide, le rafraîchit quand il expire."""
+    """Gardien de token : assure qu’on dispose en permanence d’un `access_token` valide."""
 
     _lock = threading.Lock()
 
-    def __init__(self):
-        self.access_token: Optional[str] = INITIAL_ACCESS_TOKEN
-        # forcer refresh immédiat si token absent
-        self.expires_at: float = time.time() + 10 if self.access_token else 0.0
-        # thread de fond
-        t = threading.Thread(target=self._loop, daemon=True)
-        t.start()
+    def __init__(self) -> None:
+        # au 1er démarrage, on force un refresh immédiat
+        self._access_token: str | None = None
+        self._expires_at: float = 0.0  # timestamp UTC
+        threading.Thread(target=self._daemon_loop, daemon=True).start()
 
-    # ---------------- private -----------------
-    def _loop(self):
+    # ------------------------------------------------------------------
+    def _daemon_loop(self) -> None:
         while True:
             try:
-                if time.time() >= self.expires_at:
+                # refresh anticipé : 60 s avant expiration
+                if time.time() >= self._expires_at - 60:
                     self._refresh()
-            except Exception as e:
-                logger.error("Erreur boucle refresh token: %s", e, exc_info=True)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.error("Erreur boucle refresh token: %s", exc, exc_info=True)
             time.sleep(30)
 
-    def _refresh(self):
-        logger.info("🔄 Rafraîchissement du token Zoho…")
-        url = "https://accounts.zoho.eu/oauth/v2/token"
+    # ------------------------------------------------------------------
+    def _refresh(self) -> None:
+        if not (ZOHO_CLIENT_ID and ZOHO_CLIENT_SECRET and ZOHO_REFRESH_TOKEN):
+            raise RuntimeError("Variables ZOHO_CLIENT_ID / ZOHO_CLIENT_SECRET / ZOHO_REFRESH_TOKEN manquantes")
+
         payload = {
             "refresh_token": ZOHO_REFRESH_TOKEN,
             "client_id": ZOHO_CLIENT_ID,
             "client_secret": ZOHO_CLIENT_SECRET,
             "grant_type": "refresh_token",
         }
-        r = requests.post(url, data=payload, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        if "access_token" not in data:
-            raise RuntimeError(f"Réponse inattendue token Zoho: {data}")
+        logger.info("🔄  Rafraîchissement du token Zoho…")
+        response = requests.post(TOKEN_ENDPOINT, data=payload, timeout=20)
+        if response.status_code != 200:
+            # log complet pour diagnostic
+            logger.error("❌  Zoho token %s → %s", response.status_code, response.text)
+            response.raise_for_status()
+
+        data = response.json()
+        access_token = data.get("access_token")
+        expires_in   = int(data.get("expires_in", 3600))
+        if not access_token:
+            raise RuntimeError(f"Réponse inattendue (pas d'access_token) : {data}")
+
         with self._lock:
-            self.access_token = data["access_token"]
-            # marge de sécurité 60 s avant expiration officielle
-            self.expires_at = time.time() + int(data.get("expires_in", 3600)) - 60
-        logger.info("✅ Nouveau token Zoho OK (expire dans ~%d s)", int(self.expires_at - time.time()))
+            self._access_token = access_token
+            self._expires_at   = time.time() + expires_in
+        logger.info("✅  Nouveau token Zoho OK – expire dans %d s", expires_in)
 
-    # ---------------- public ------------------
+    # ------------------------------------------------------------------
     def get(self) -> str:
-        """Retourne un token valide (rafraîchit si nécessaire)"""
-        if time.time() >= self.expires_at:
-            # rafraîchir en synchrone si thread n'a pas encore tourné
+        """Retourne un token valide (rafraîchit synchronement si nécessaire)."""
+        if time.time() >= self._expires_at - 60:
             with self._lock:
-                if time.time() >= self.expires_at:
+                if time.time() >= self._expires_at - 60:
                     self._refresh()
-        return self.access_token
+        assert self._access_token, "Token Zoho non initialisé"
+        return self._access_token
 
-
+# instance globale
 token_keeper = ZohoTokenKeeper()
 
-# --------------------------------------------------
-# Helpers Zoho CRM
-# --------------------------------------------------
+# ---------------------------------------------------------------------------
+# Helpers Zoho
+# ---------------------------------------------------------------------------
 
-def _zoho_headers() -> Dict[str, str]:
+def zoho_headers() -> Dict[str, str]:
     return {
         "Authorization": f"Zoho-oauthtoken {token_keeper.get()}",
         "Content-Type": "application/json",
     }
 
 
-def create_lead(payload: Dict[str, Any]) -> str:
-    """Crée un lead Zoho. Retourne l'ID Zoho."""
-    logger.info("➡️  Création Lead Zoho…")
-    r = requests.post(ZOHO_API_URL, json={"data": [payload]}, headers=_zoho_headers(), timeout=15)
+def zoho_create_lead(payload: Dict[str, Any]) -> str:
+    """Crée un lead et renvoie son ID."""
+    logger.info("➡️  POST %s", LEADS_ENDPOINT)
+    r = requests.post(LEADS_ENDPOINT, json={"data": [payload]}, headers=zoho_headers(), timeout=20)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"Erreur Zoho Lead {r.status_code}: {r.text}")
-    data = r.json()["data"][0]
+
+    data = r.json().get("data", [{}])[0]
     if data.get("status") != "success":
-        raise RuntimeError(f"Zoho a renvoyé un status != success: {data}")
-    record_id = data["details"]["id"]
-    logger.info("✅ Lead créé (#%s)", record_id)
+        raise RuntimeError(f"Réponse Zoho inattendue: {data}")
+    record_id: str = data["details"]["id"]
+    logger.info("✅  Lead créé #%s", record_id)
     return record_id
 
 
-def attach_pdf(record_id: str, pdf_path: Path):
-    """Attache un PDF au lead."""
+def zoho_attach_pdf(record_id: str, pdf_path: Path) -> None:
     if not pdf_path.exists():
-        logger.warning("⛔ PDF introuvable %s – pièce jointe ignorée", pdf_path)
+        logger.warning("Pièce jointe %s introuvable", pdf_path)
         return
-    url = ZOHO_ATTACHMENT_URL.format(record_id=record_id)
-    logger.info("📎 Upload PDF → Zoho Attachments")
-    with pdf_path.open("rb") as f:
-        files = {"file": (pdf_path.name, f, "application/pdf")}
+    url = ATTACH_ENDPOINT.format(record_id=record_id)
+    with pdf_path.open("rb") as fb:
+        files = {"file": (pdf_path.name, fb, "application/pdf")}
         r = requests.post(url, files=files, headers={"Authorization": f"Zoho-oauthtoken {token_keeper.get()}"}, timeout=30)
     if r.status_code not in (200, 201):
-        raise RuntimeError(f"Erreur upload pièce jointe {r.status_code}: {r.text}")
-    logger.info("✅ Pièce jointe OK")
+        raise RuntimeError(f"Erreur pièce jointe Zoho {r.status_code}: {r.text}")
+    logger.info("📎  Pièce jointe uploadée")
 
-# --------------------------------------------------
-# Flask
-# --------------------------------------------------
+# ---------------------------------------------------------------------------
+# Flask
+# ---------------------------------------------------------------------------
 app = Flask(__name__)
 
-UPLOAD_DIR = Path("/tmp/uploads")
-UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
-
 @app.route("/submit", methods=["POST"])
-def submit():
+def submit() -> Any:
     try:
         data = request.form.to_dict()
-        logger.info("Form reçu: %s", data)
+        logger.info("Form reçu → %s", data)
 
-        # Construire le payload Zoho avec les champs essentiels
         lead_payload = {
-            "Company": data.get("Company", "Spectra Media"),
-            "Last_Name": data.get("Last_Name") or data.get("LastName") or "Unknown",
-            "First_Name": data.get("First_Name") or data.get("FirstName"),
-            "Email": data.get("Email"),
-            "Phone": data.get("Phone"),
+            "Company":     data.get("Company", "Spectra Media"),
+            "Last_Name":   data.get("Last_Name") or data.get("LastName") or "Unknown",
+            "First_Name":  data.get("First_Name") or data.get("FirstName"),
+            "Email":       data.get("Email"),
+            "Phone":       data.get("Phone"),
             "Description": data.get("Description"),
         }
 
-        # 1. créer le lead
-        record_id = create_lead(lead_payload)
+        lead_id = zoho_create_lead(lead_payload)
 
-        # 2. gérer le PDF (optionnel)
+        # optionnel : gestion PDF en multipart
         if "file" in request.files:
-            file_obj = request.files["file"]
-            filename = secure_filename(file_obj.filename)
-            pdf_path = UPLOAD_DIR / filename
-            file_obj.save(pdf_path)
-            attach_pdf(record_id, pdf_path)
-            pdf_path.unlink(missing_ok=True)
+            f = request.files["file"]
+            filename = secure_filename(f.filename)
+            filepath = UPLOAD_DIR / filename
+            f.save(filepath)
+            zoho_attach_pdf(lead_id, filepath)
+            filepath.unlink(missing_ok=True)
 
-        return jsonify({"status": "success", "record_id": record_id})
+        return jsonify({"status": "success", "lead_id": lead_id})
 
-    except Exception as e:
-        logger.error("Submit error: %s", e, exc_info=True)
-        return jsonify({"status": "error", "message": str(e)}), 500
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error("Erreur /submit : %s", exc, exc_info=True)
+        return jsonify({"status": "error", "message": str(exc)}), 500
 
 @app.route("/healthz")
-def health():
+def healthz():
     return "OK", 200
 
-# --------------------------------------------------
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
