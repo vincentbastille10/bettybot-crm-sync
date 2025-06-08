@@ -24,18 +24,19 @@ app = Flask(__name__)
 FORM_HTML = open("form.html").read()
 
 def generate_pdf(data, filename):
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    uid = str(uuid.uuid4())[:8]
-    data['Horodatage'] = timestamp
-    data['Identifiant'] = uid
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
+    pdf.add_font('DejaVu', '', 'dejavu-sans/DejaVuSans.ttf', uni=True)
+    pdf.set_font('DejaVu', '', 12)
+
     pdf.cell(200, 10, txt="Fiche Lead - Zoho CRM", ln=True, align='C')
     pdf.ln(10)
+
     for key, value in data.items():
         pdf.multi_cell(0, 10, txt=f"{key} : {value}")
+
     pdf.output(filename)
+
 
 def send_email_with_pdf(to_email, subject, body, pdf_path):
     msg = MIMEMultipart()
