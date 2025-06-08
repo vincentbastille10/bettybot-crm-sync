@@ -74,7 +74,7 @@ def attach_pdf_to_zoho(record_id, filepath):
     except Exception as e:
         print(f"⚠️ Erreur lors du parsing JSON de la réponse d’attachement : {e}")
     
-    return False
+    return False 
 
 @app.route("/")
 def form():
@@ -143,4 +143,4 @@ def get_available_port(default=5000, fallback=5050):
 if __name__ == "__main__":
     port = get_available_port()
     print(f"🔁 Lancement sur le port {port}")
-    app.run(debug=True, port=port)
+    app.run(host="0.0.0.0", port=port, debug=True)
