@@ -209,16 +209,25 @@ def submit():
             zoho_attach_pdf(lead_id, pdf_path)
             pdf_attached = True
 
+        lead_name = f"{lead_payload['First_Name']} {lead_payload['Last_Name']}".strip()
+
         send_mail(
-            subject="Nouveau lead BettyBot",
-            body=f"Un nouveau lead Zoho vient d'être créé (ID {lead_id}). Pièce jointe: {pdf_attached}",
+            subject=f"Lead créé : {lead_name}",
+            body=f"Lead envoyé à Zoho avec succès (ID : {lead_id}). PDF envoyé à {EMAIL_DEST} : {pdf_attached}",
             attachment=pdf_path if pdf_attached else None,
         )
 
         if pdf_path and pdf_path.exists():
             pdf_path.unlink(missing_ok=True)
 
-        return jsonify({"status": "success", "lead_id": lead_id}), 201
+        return render_template_string(f"""
+            <html><body>
+            <h3>✅ Lead envoyé à Zoho avec succès !</h3>
+            <p>ID : {lead_id}<br>
+            PDF envoyé à {EMAIL_DEST} : {pdf_attached}</p>
+            <a href='/form'>⬅ Retour au formulaire</a>
+            </body></html>
+        """)
 
     except Exception as err:
         logger.error("Submit error %s", err, exc_info=True)
