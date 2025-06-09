@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Spectra Media – BettyBot CRM Sync
 ================================================
 Flask micro‑service (monolith) qui :
@@ -9,7 +10,6 @@ Flask micro‑service (monolith) qui :
 
 ⚙️ **Toutes les valeurs sensibles doivent être injectées par variables d’environnement Render**
 """
-from __future__ import annotations
 
 import logging
 import os
