@@ -198,16 +198,16 @@ def submit():
 
         lead_id = zoho_create_lead(lead_payload)
 
-        pdf_path: Path | None = None
-        if "file" in request.files:
-            f = request.files["file"]
+        f = request.files.get("file")
+        pdf_attached = False
+        pdf_path = None
+
+        if f and f.filename:
             filename = secure_filename(f.filename)
             pdf_path = UPLOAD_DIR / filename
-            f.save(pdf_path)
+            f.save(str(pdf_path))
             zoho_attach_pdf(lead_id, pdf_path)
             pdf_attached = True
-        else:
-            pdf_attached = False
 
         send_mail(
             subject="Nouveau lead BettyBot",
