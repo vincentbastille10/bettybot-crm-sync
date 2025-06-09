@@ -7,7 +7,7 @@ Flask micro‑service (monolith) qui :
 • rafraîchit en continu le token OAuth Zoho  
 • crée le lead dans Zoho CRM + attache un PDF facultatif  
 • envoie un mail de notification (facultatif)  
-• expose `/` et `/healthz` pour Render et tests rapides
+• expose `/`, `/healthz`, et `/form` pour Render et tests rapides
 
 ⚙ **Toutes les valeurs sensibles doivent être injectées par variables d’environnement Render**
 """
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, render_template_string
 from werkzeug.utils import secure_filename
 
 # =============================================================================
@@ -156,12 +156,30 @@ def send_mail(subject: str, body: str, attachment: Path | None = None) -> None:
 app = Flask(__name__)
 
 @app.route("/")
-def index() -> tuple[str, int]:
-    return "BettyBot CRM Sync : up 🚀", 200
+def root_redirect():
+    return form_page()
 
 @app.route("/healthz")
 def healthz() -> tuple[str, int]:
     return "OK", 200
+
+@app.route("/form")
+def form_page():
+    html = """
+    <!DOCTYPE html><html><body>
+    <h2>Formulaire BettyBot</h2>
+    <form action="/submit" method="post" enctype="multipart/form-data">
+      Nom: <input type="text" name="Last_Name"><br>
+      Prénom: <input type="text" name="First_Name"><br>
+      Email: <input type="email" name="Email"><br>
+      Téléphone: <input type="tel" name="Phone"><br>
+      Société: <input type="text" name="Company"><br>
+      Description: <textarea name="Description"></textarea><br>
+      Fichier (PDF): <input type="file" name="file"><br>
+      <input type="submit" value="Envoyer">
+    </form></body></html>
+    """
+    return render_template_string(html)
 
 @app.route("/submit", methods=["POST"])
 def submit():
