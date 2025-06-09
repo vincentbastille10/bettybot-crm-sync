@@ -1,10 +1,6 @@
 from __future__ import annotations
-<<<<<<< HEAD
-=======
 
->>>>>>> 107a8a3 (Fix: from __future__ import moved to top)
 """Spectra Media – BettyBot CRM Sync
-================================================
 Flask micro‑service (monolith) qui :
 • reçoit un POST `/submit` depuis ton chatbot / formulaire  
 • rafraîchit en continu le token OAuth Zoho  
@@ -14,7 +10,6 @@ Flask micro‑service (monolith) qui :
 
 ⚙️ **Toutes les valeurs sensibles doivent être injectées par variables d’environnement Render**
 """
-<<<<<<< HEAD
 
 import logging
 import os
@@ -255,7 +250,6 @@ Flask micro‑service (monolith) qui :
 """
 from __future__ import annotations
 =======
->>>>>>> 107a8a3 (Fix: from __future__ import moved to top)
 
 import logging
 import os
